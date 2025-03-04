@@ -4,7 +4,7 @@ DualPipe is an innovative bidirectional pipeline parallelism algorithm introduce
 
 ### Schedules
 
-![schedules](images/schedules.png)
+![dualpipe](images/dualpipe.png)
 
 Example DualPipe scheduling for 8 PP ranks and 20 micro-batches in two directions.
 The micro-batches in the reverse direction are symmetric to those in the forward direction, so
@@ -23,12 +23,21 @@ have mutually overlapped computation and communication
 full backward chunk, 𝑊 denotes the execution time of a "backward for weights" chunk, and 𝐹&𝐵
 denotes the execution time of two mutually overlapped forward and backward chunks.
 
+# DualPipeV
+
+DualPipeV is a concise V-shape schedule derived from DualPipe using a "cut-in-half" procedure, introduced by Sea AI Lab as "Cut-in-half" in their [blog post](https://hackmd.io/@ufotalent/r1lVXsa9Jg). Thanks to them for this efficient schedule!
+
+![dualpipev](images/dualpipev.png)
+
+Example DualPipeV scheduling for 4 PP ranks and 10 micro-batches.
+
 ## Quick Start
 
 The usage is shown in the following example:
 
 ```bash
-python example.py
+python examples/example_dualpipe.py
+python examples/example_dualpipev.py
 ```
 
 Note: For real-world applications, you will need to implement a custom `overlapped_forward_backward` method tailored to your specific module.
