@@ -23,9 +23,11 @@ have mutually overlapped computation and communication
 full backward chunk, 𝑊 denotes the execution time of a "backward for weights" chunk, and 𝐹&𝐵
 denotes the execution time of two mutually overlapped forward and backward chunks.
 
-# DualPipeV
+## DualPipeV
 
 DualPipeV is a concise V-shape schedule derived from DualPipe using a "cut-in-half" procedure, introduced by Sea AI Lab as "Cut-in-half" in their [blog post](https://hackmd.io/@ufotalent/r1lVXsa9Jg). Thanks to them for this efficient schedule!
+
+### Schedules
 
 ![dualpipev](images/dualpipev.png)
 
