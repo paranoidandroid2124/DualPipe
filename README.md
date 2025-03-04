@@ -11,18 +11,6 @@ The micro-batches in the reverse direction are symmetric to those in the forward
 we omit their batch ID for illustration simplicity. Two cells enclosed by a shared black border
 have mutually overlapped computation and communication
 
-### Pipeline Bubbles and Memory Usage Comparison
-
-| Method      | Bubble                          | Parameter | Activation |
-|-------------|---------------------------------|-----------|------------|
-| 1F1B        | (PP-1)(𝐹+𝐵)                     | 1×        | PP         |
-| ZB1P        | (PP-1)(𝐹+𝐵-2𝑊)                  | 1×        | PP         |
-| DualPipe    | (PP/2-1)(𝐹&𝐵+𝐵-3𝑊)             | 2×        | PP+1       |
-
-𝐹 denotes the execution time of a forward chunk, 𝐵 denotes the execution time of a
-full backward chunk, 𝑊 denotes the execution time of a "backward for weights" chunk, and 𝐹&𝐵
-denotes the execution time of two mutually overlapped forward and backward chunks.
-
 ## DualPipeV
 
 DualPipeV is a concise V-shape schedule derived from DualPipe using a "cut-in-half" procedure, introduced by Sea AI Lab as "Cut-in-half" in their [blog post](https://hackmd.io/@ufotalent/r1lVXsa9Jg). Thanks to them for this efficient schedule!
@@ -32,6 +20,20 @@ DualPipeV is a concise V-shape schedule derived from DualPipe using a "cut-in-ha
 ![dualpipev](images/dualpipev.png)
 
 Example DualPipeV scheduling for 4 PP ranks and 10 micro-batches.
+
+## Pipeline Bubbles and Memory Usage Comparison (vs. equivalent pp stages)
+
+| Method      | Bubble                          | Parameter | Activation | #Devices |
+|-------------|---------------------------------|-----------|------------|----------|
+| 1F1B        | (*PP*-1)(𝐹+𝐵)                   | 1×        | *PP*       | *PP*     |
+| ZB1P        | (*PP*-1)(𝐹+𝐵-2𝑊)               | 1×        | *PP*       | *PP*     |
+| DualPipe    | (*PP*/2-1)(𝐹&𝐵+𝐵-3𝑊)           | 2×        | *PP*+1     | *PP*     |
+| DualPipeV   | (*PP*/2-1)(𝐹&𝐵+𝐵-3𝑊)           | 2×        | *PP*+1     | *PP*/2   |
+
+*PP* denotes the number of pp stages (even).
+𝐹 denotes the execution time of a forward chunk, 𝐵 denotes the execution time of a
+full backward chunk, 𝑊 denotes the execution time of a "backward for weights" chunk, and 𝐹&𝐵
+denotes the execution time of two mutually overlapped forward and backward chunks.
 
 ## Quick Start
 
