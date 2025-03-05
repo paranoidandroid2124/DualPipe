@@ -19,16 +19,16 @@ DualPipeV is a concise V-shape schedule derived from DualPipe using a "cut-in-ha
 
 ![dualpipev](images/dualpipev.png)
 
-Example DualPipeV scheduling for 4 PP ranks and 10 micro-batches.
+Example DualPipeV scheduling for 4 PP ranks (8 PP stages) and 10 micro-batches.
 
-## Pipeline Bubbles and Memory Usage Comparison (vs. equivalent pp stages)
+## Pipeline Bubbles and Memory Usage Comparison (based on the same number of PP stages)
 
-| Method      | Bubble                          | Parameter | Activation | #Devices |
-|-------------|---------------------------------|-----------|------------|----------|
-| 1F1B        | (*PP*-1)(𝐹+𝐵)                   | 1×        | *PP*       | *PP*     |
-| ZB1P        | (*PP*-1)(𝐹+𝐵-2𝑊)               | 1×        | *PP*       | *PP*     |
-| DualPipe    | (*PP*/2-1)(𝐹&𝐵+𝐵-3𝑊)           | 2×        | *PP*+1     | *PP*     |
-| DualPipeV   | (*PP*/2-1)(𝐹&𝐵+𝐵-3𝑊)           | 2×        | *PP*+1     | *PP*/2   |
+| Method      | Bubble                          | Parameter Per Device | Activation Per Device | #Devices |
+|-------------|---------------------------------|----------------------|-----------------------|----------|
+| 1F1B        | (*PP*-1)(𝐹+𝐵)                   | 1×                   | *PP*                  | *PP*     |
+| ZB1P        | (*PP*-1)(𝐹+𝐵-2𝑊)               | 1×                   | *PP*                  | *PP*     |
+| DualPipe    | (*PP*/2-1)(𝐹&𝐵+𝐵-3𝑊)           | 2×                   | *PP*+1                | *PP*     |
+| DualPipeV   | (*PP*/2-1)(𝐹&𝐵+𝐵-3𝑊)           | 2×                   | *PP*+1                | *PP*/2   |
 
 *PP* denotes the number of pp stages (even).
 𝐹 denotes the execution time of a forward chunk, 𝐵 denotes the execution time of a
