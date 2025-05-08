@@ -70,8 +70,8 @@ class PipelineStage(nn.Module):
         labels0: Optional[List[torch.Tensor]],
         module1: "PipelineStage",
         loss1: Optional[torch.Tensor],
-        outputs1: Optional[List[torch.Tensor]],
-        output_grads1: Optional[List[torch.Tensor]],
+        outputs1: Optional[List[torch.Tensor]], # Should be Tuple[torch.Tensor] from caller
+        output_grads1: Optional[List[torch.Tensor]], # Should be Tuple[torch.Tensor] from caller
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         You should implement custom forward-backward overlap strategy.
@@ -93,9 +93,10 @@ class PipelineStage(nn.Module):
         if loss1 is not None:
             loss1.backward()
             loss1.detach_()
-        elif outputs1 is not None and output_grads1 is not None:
+        elif outputs1 is not None and output_grads1 is not None and len(outputs1) > 0: # Check if outputs1 is not empty
             # Ensure outputs1 and output_grads1 are on the correct device for module1's backward pass
             device1 = next(module1.parameters()).device
+            # outputs1 is a tuple of tensors, convert to list for .to() and then back to tuple if needed by run_backward
             outputs1_on_device = [out.to(device1) for out in outputs1]
             output_grads1_on_device = [grad.to(device1) if grad is not None else None for grad in output_grads1]
             
@@ -108,7 +109,20 @@ class PipelineStage(nn.Module):
                     valid_grads.append(g)
             
             if valid_outputs: # Proceed only if there are tensors requiring gradients
-                 # Convert lists to tuples before passing to run_backward
+                 # ---- START DEBUG PRINT ----
+                 current_rank = dist.get_rank() if dist.is_initialized() else -1
+                 print(f"Rank {current_rank}: In overlapped_forward_backward for module1's backward pass.", flush=True)
+                 print(f"Rank {current_rank}: valid_outputs[0].shape = {valid_outputs[0].shape}, requires_grad = {valid_outputs[0].requires_grad}", flush=True)
+                 if hasattr(valid_outputs[0], 'is_leaf'):
+                     print(f"Rank {current_rank}: valid_outputs[0].is_leaf = {valid_outputs[0].is_leaf}", flush=True)
+                 if valid_outputs[0].grad_fn is not None:
+                     print(f"Rank {current_rank}: valid_outputs[0].grad_fn = {valid_outputs[0].grad_fn}", flush=True)
+                 else:
+                     print(f"Rank {current_rank}: valid_outputs[0].grad_fn is None", flush=True)
+
+                 print(f"Rank {current_rank}: valid_grads[0].shape = {valid_grads[0].shape}, requires_grad = {valid_grads[0].requires_grad if valid_grads[0] is not None else 'N/A'}", flush=True)
+                 sys.stdout.flush()
+                 # ---- END DEBUG PRINT ----
                  run_backward(tuple(valid_outputs), tuple(valid_grads))
 
 
@@ -146,7 +160,13 @@ def cal_diff(x: torch.Tensor, y: torch.Tensor) -> float:
     y = y.to(x.device)
     # Add a small epsilon to the denominator to prevent division by zero if norms are zero
     eps = 1e-12
-    cos_diff = 1 - 2 * (x * y).sum().item() / ((x * x).sum() + (y * y).sum() + eps).item() 
+    sum_xy = (x * y).sum().item()
+    sum_x_sq = (x * x).sum().item()
+    sum_y_sq = (y * y).sum().item()
+    denominator = sum_x_sq + sum_y_sq + eps
+    if denominator == 0: # Avoid division by zero if both norms are zero
+        return 0.0 if sum_xy == 0 else 1.0 # Or handle as appropriate
+    cos_diff = 1 - 2 * sum_xy / denominator
     return cos_diff
 
 
@@ -209,15 +229,22 @@ def main(rank, pp_size):
 
     if rank == 0: 
         loss_ref_full, output_ref_full = ref_step(full_x, full_l, full_modules_ref, num_chunks)
-        loss_ref_val_chunks = loss_ref_full.chunk(2)
-        output_ref_val_chunks = output_ref_full.chunk(2)
+        if pp_size > 0 : # Ensure pp_size is valid for chunking
+            loss_ref_val_chunks = loss_ref_full.chunk( min(2, pp_size) ) # Avoid error if pp_size < 2 for chunking
+            output_ref_val_chunks = output_ref_full.chunk( min(2, pp_size) )
+        else: # Should not happen with current test logic
+            loss_ref_val_chunks = [loss_ref_full]
+            output_ref_val_chunks = [output_ref_full]
+
     
     # DualPipe setup
     local_stage1 = PipelineStage(hidden_size).to(current_device)
     local_stage2 = PipelineStage(hidden_size).to(current_device)
     
-    local_stage1.load_state_dict(full_modules_ref[rank].state_dict())
-    local_stage2.load_state_dict(full_modules_ref[pp_size - 1 - rank].state_dict())
+    # Ensure pp_size is at least 1 for indexing full_modules_ref
+    if pp_size > 0:
+        local_stage1.load_state_dict(full_modules_ref[rank % pp_size].state_dict()) # Use modulo for safety if rank >= pp_size (not expected here)
+        local_stage2.load_state_dict(full_modules_ref[(pp_size - 1 - rank) % pp_size].state_dict())
     
     local_modules_dp = nn.ModuleList([local_stage1, local_stage2]) 
     dualpipe_model = DualPipe(tuple(local_modules_dp), process_group=dist.group.WORLD, rank_mapping=list(range(pp_size)))
@@ -225,29 +252,37 @@ def main(rank, pp_size):
 
     # DualPipe inputs:
     x_dp, l_dp = None, None
-    if is_first_rank:
-        x_dp = full_x.chunk(2)[0].to(current_device)
-        l_dp = full_l.chunk(2)[1].to(current_device) 
-    elif is_last_rank:
-        x_dp = full_x.chunk(2)[1].to(current_device)
-        l_dp = full_l.chunk(2)[0].to(current_device) 
+    if pp_size > 0: # Ensure pp_size is valid for chunking logic
+        if is_first_rank:
+            x_dp = full_x.chunk(2)[0].to(current_device)
+            l_dp = full_l.chunk(2)[1].to(current_device) 
+        elif is_last_rank: # This implies pp_size > 1 for is_last_rank to be different from is_first_rank
+            x_dp = full_x.chunk(2)[1].to(current_device)
+            l_dp = full_l.chunk(2)[0].to(current_device) 
 
     # Training step with DualPipe
     loss_dp, outputs_dp = dualpipe_model.step(x_dp, num_chunks=num_chunks, criterion=criterion, labels=(l_dp,) if l_dp is not None else [], return_outputs=False)
     
     ref_loss_for_current_rank = None
-    if rank == 0: 
-        ref_loss_for_current_rank = loss_ref_val_chunks[1]
-    elif rank == pp_size -1: 
-        ref_loss_for_current_rank = loss_ref_val_chunks[0]
+    # Adjust logic for pp_size=1 if that becomes a test case, though DualPipe implies >=2
+    if pp_size > 0:
+        if rank == 0 and len(loss_ref_val_chunks) > 1 : 
+            ref_loss_for_current_rank = loss_ref_val_chunks[1]
+        elif rank == 0 and len(loss_ref_val_chunks) == 1: # Case for pp_size=1 or if chunking resulted in 1
+             ref_loss_for_current_rank = loss_ref_val_chunks[0]
+        elif rank == pp_size -1 and len(loss_ref_val_chunks) > 0: 
+            ref_loss_for_current_rank = loss_ref_val_chunks[0]
+
 
     if loss_dp is not None:
         if ref_loss_for_current_rank is not None:
-             assert torch.allclose(loss_dp, ref_loss_for_current_rank.to(current_device), atol=1e-5), f"Rank {rank} loss mismatch"
+             assert torch.allclose(loss_dp, ref_loss_for_current_rank.to(current_device), atol=1e-5), f"Rank {rank} loss mismatch. Got {loss_dp}, expected {ref_loss_for_current_rank}"
         else:
-            assert False, f"Rank {rank} computed loss_dp but no reference was assigned."
+            # This might happen if pp_size = 1 and rank 0 is both first and last, logic for ref_loss_for_current_rank needs care
+            if not (pp_size == 1 and rank == 0): # Allow if pp_size=1, rank 0
+                 assert False, f"Rank {rank} computed loss_dp but no reference was assigned."
             
-    elif ref_loss_for_current_rank is not None:
+    elif ref_loss_for_current_rank is not None and not (pp_size == 1 and rank==0 and loss_dp is not None): # if loss_dp is None but ref exists
         assert False, f"Rank {rank} loss_dp is None but a reference loss was expected."
         
     assert outputs_dp is None 
@@ -272,23 +307,28 @@ def main(rank, pp_size):
     ref_loss_inf_for_current_rank = None
     ref_output_inf_for_current_rank = None
 
-    if rank == 0: 
-        ref_loss_inf_for_current_rank = loss_ref_val_chunks[1]
-        ref_output_inf_for_current_rank = output_ref_val_chunks[1]
-    elif rank == pp_size -1: 
-        ref_loss_inf_for_current_rank = loss_ref_val_chunks[0]
-        ref_output_inf_for_current_rank = output_ref_val_chunks[0]
+    if pp_size > 0:
+        if rank == 0 and len(loss_ref_val_chunks) > 1: 
+            ref_loss_inf_for_current_rank = loss_ref_val_chunks[1]
+            ref_output_inf_for_current_rank = output_ref_val_chunks[1]
+        elif rank == 0 and len(loss_ref_val_chunks) == 1: # Case for pp_size=1
+            ref_loss_inf_for_current_rank = loss_ref_val_chunks[0]
+            ref_output_inf_for_current_rank = output_ref_val_chunks[0]
+        elif rank == pp_size -1 and len(loss_ref_val_chunks) > 0: 
+            ref_loss_inf_for_current_rank = loss_ref_val_chunks[0]
+            ref_output_inf_for_current_rank = output_ref_val_chunks[0]
+
 
     if loss_dp_inf is not None:
         if ref_loss_inf_for_current_rank is not None:
-            assert torch.allclose(loss_dp_inf, ref_loss_inf_for_current_rank.to(current_device), atol=1e-5), f"Rank {rank} inference loss mismatch"
-    elif ref_loss_inf_for_current_rank is not None:
+            assert torch.allclose(loss_dp_inf, ref_loss_inf_for_current_rank.to(current_device), atol=1e-5), f"Rank {rank} inference loss mismatch. Got {loss_dp_inf}, expected {ref_loss_inf_for_current_rank}"
+    elif ref_loss_inf_for_current_rank is not None and not (pp_size ==1 and rank==0 and loss_dp_inf is not None) :
          assert False, f"Rank {rank} inference loss_dp_inf is None but a reference loss was expected."
 
     if outputs_dp_inf is not None:
         if ref_output_inf_for_current_rank is not None:
-            assert torch.allclose(outputs_dp_inf, ref_output_inf_for_current_rank.to(current_device), atol=1e-5), f"Rank {rank} inference output mismatch"
-    elif ref_output_inf_for_current_rank is not None:
+            assert torch.allclose(outputs_dp_inf, ref_output_inf_for_current_rank.to(current_device), atol=1e-5), f"Rank {rank} inference output mismatch. Got {outputs_dp_inf.shape}, expected {ref_output_inf_for_current_rank.shape}"
+    elif ref_output_inf_for_current_rank is not None and not (pp_size == 1 and rank ==0 and outputs_dp_inf is not None):
         assert False, f"Rank {rank} inference outputs_dp_inf is None but a reference output was expected."
         
     # Clean up the process group
@@ -317,10 +357,10 @@ if __name__ == "__main__":
         if available_gpus % 2 != 0 and available_gpus > 1 : 
             start_gpus = available_gpus -1
         elif available_gpus == 1: 
-            start_gpus = 0 
+            start_gpus = 0 # Will cause the loop to be skipped, handled by print below
 
         if start_gpus >=2: 
-            for ngpus_to_test in range(start_gpus, 1, -2): 
+            for ngpus_to_test in range(start_gpus, 1, -2): # Loop from start_gpus down to 2 (inclusive)
                 print(f"--- Testing DualPipe with {ngpus_to_test} GPUs ---", flush=True)
                 sys.stdout.flush()
                 try:
@@ -328,11 +368,11 @@ if __name__ == "__main__":
                     print(f"--- Test with {ngpus_to_test} GPUs PASSED ---", flush=True)
                 except Exception as e:
                     print(f"--- Test with {ngpus_to_test} GPUs FAILED: {e} ---", flush=True)
+                    # traceback.print_exc() # Optionally print full traceback for the exception
                 finally:
                     sys.stdout.flush() # Ensure all output is flushed
-        elif available_gpus > 0 : 
+        elif available_gpus > 0 : # Handles the case of 1 GPU available
              print(f"Skipping DualPipe test as it requires at least 2 GPUs for this example's P2P setup, found {available_gpus}.", flush=True)
-        else: 
-             print("No GPUs to test with (re-check after available_gpus logic).", flush=True)
+        # No need for the final else, as available_gpus == 0 is handled at the beginning.
     sys.stdout.flush() # Final flush
 
